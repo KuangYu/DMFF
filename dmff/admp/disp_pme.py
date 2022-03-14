@@ -100,17 +100,17 @@ def energy_disp_pme(positions, box, pairs,
         energy: total dispersion pme energy
     '''
 
-    ene_real = disp_pme_real(positions, box, pairs, c_list, mScales, covalent_map, kappa, pmax)
+    ene_real = disp_pme_real(positions, box, pairs, c_list, mScales, covalent_map, 0, pmax)
 
-    ene_recip = recip_fn6(positions, box, c_list[:, 0, jnp.newaxis])
-    if pmax >= 8:
-        ene_recip += recip_fn8(positions, box, c_list[:, 1, jnp.newaxis])
-    if pmax >= 10:
-        ene_recip += recip_fn10(positions, box, c_list[:, 2, jnp.newaxis])
+    # ene_recip = recip_fn6(positions, box, c_list[:, 0, jnp.newaxis])
+    # if pmax >= 8:
+    #     ene_recip += recip_fn8(positions, box, c_list[:, 1, jnp.newaxis])
+    # if pmax >= 10:
+    #     ene_recip += recip_fn10(positions, box, c_list[:, 2, jnp.newaxis])
 
-    ene_self = disp_pme_self(c_list, kappa, pmax)
+    # ene_self = disp_pme_self(c_list, kappa, pmax)
 
-    return ene_real + ene_recip + ene_self
+    return ene_real # + ene_recip + ene_self
 
 
 def disp_pme_real(positions, box, pairs, 

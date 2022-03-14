@@ -242,19 +242,19 @@ def energy_pme(positions, box, pairs,
 
     if lpol:
         ene_real = pme_real(positions, box, pairs, Q_global, U_ind, pol, tholes, 
-                           mScales, pScales, dScales, covalent_map, kappa, lmax, True)
+                           mScales, pScales, dScales, covalent_map, 0, lmax, True)
     else:
         ene_real = pme_real(positions, box, pairs, Q_global, None, None, None,
-                           mScales, None, None, covalent_map, kappa, lmax, False)
+                           mScales, None, None, covalent_map, 0, lmax, False)
 
-    ene_recip = pme_recip_fn(positions, box, Q_global_tot)
+    # ene_recip = pme_recip_fn(positions, box, Q_global_tot)
 
-    ene_self = pme_self(Q_global_tot, kappa, lmax)
+    # ene_self = pme_self(Q_global_tot, kappa, lmax)
 
     if lpol:
-        ene_self += pol_penalty(U_ind, pol)
+        ene_self = pol_penalty(U_ind, pol)
 
-    return ene_real + ene_recip + ene_self
+    return ene_real + ene_self
 
 
 # @partial(vmap, in_axes=(0, 0, None, None), out_axes=0)

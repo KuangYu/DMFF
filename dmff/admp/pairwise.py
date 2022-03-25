@@ -5,6 +5,8 @@ from dmff.utils import jit_condition
 from dmff.admp.spatial import v_pbc_shift
 from functools import partial
 
+DIELECTRIC = 1389.35455846
+
 # for debug
 # from jax_md import partition, space
 # from admp.parser import *
@@ -62,7 +64,7 @@ def generate_pairwise_interaction(pair_int_kernel, covalent_map, static_args):
     '''
 
     def pair_int(positions, box, pairs, mScales, *atomic_params):
-        pairs =  pairs[pairs[:, 0] < pairs[:, 1]]
+        # pairs =  pairs[pairs[:, 0] < pairs[:, 1]]
         ri = distribute_v3(positions, pairs[:, 0])
         rj = distribute_v3(positions, pairs[:, 1])
         # ri = positions[pairs[:, 0]]
@@ -108,6 +110,18 @@ def TT_damping_qq_c6_kernel(dr, m, ai, aj, bi, bj, qi, qj, ci, cj):
         + exp_br*(1+br+br2/2+br3/6+br4/24+br5/120+br6/720) * c / dr**6
 
     return f * m
+
+
+@vmap
+@jit_condition(static_argnums={})
+def TT_damping_qq_kernel(dr, m, bi, bj, qi, qj):
+    b = jnp.sqrt(bi * bj)
+    q = qi * qj
+    br = b * dr
+    exp_br = jnp.exp(-br)
+    f = - DIELECTRIC * exp_br * (1+br) * q / dr 
+    return f * m
+
 
 @vmap
 @jit_condition(static_argnums=())

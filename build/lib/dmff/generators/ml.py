@@ -178,10 +178,32 @@ class BASEGenerator:
             self.state_dict_file = ffmeta["state_dict"]
             self.config_file = ffmeta["config"]
 
+        self.model = self._initialize_model()
+        
+        # now model is fully loaded, start to register parameters
+        named_parameters = self.model.named_parameters()
+        self.params_t = OrderedDict()
+        for name, param in named_parameters:
+            self.params_t[name] = param
+        self.params = t2j_pytree(self.params_t)
+        for k in self.params:
+            # set mask to all true
+            paramset.addParameter(self.params[k], k, field=self.name, mask=jnp.ones(self.params[k].shape))
+
+        self.params_noopt = OrderedDict()
+        state_dict = self.model.state_dict()
+        for k in state_dict:
+            if k not in self.params_t:
+                self.params_noopt[k] = state_dict[k]
+
+        return
+
+
+    def _initialize_model(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(self.device)
+        # print(self.device)
         if self.device == "cuda" and self.ckpt_file is not None:
-            self.model = torch.jit.load(self.ckpt_file, map_location=self.device)
+            model = torch.jit.load(self.ckpt_file, map_location=self.device)
             self.state_dict_file = re.sub('.pt$', '_sd.pt', self.ckpt_file)
         else:
             # checkpoint = torch.load(self.state_dict_file, map_location=self.device)
@@ -211,50 +233,33 @@ class BASEGenerator:
 
             if model_name_upper == 'ET':
                 from base.models.base_et import BaseET
-                self.model = BaseET(device = self.device,
+                model = BaseET(device = self.device,
                                 dtype = self.dtype,
                                 nn_params = nn_params,
                                 gnn_params = gnn_params)
             elif model_name_upper == 'DET':
                 from base.models.base_det import BaseDET
-                self.model = BaseDET(device = self.device,
+                model = BaseDET(device = self.device,
                                 dtype = self.dtype,
                                 nn_params = nn_params,
                                 gnn_params = gnn_params)
             elif model_name_upper == 'VISNET':
                 from base.models.base_visnet import BaseVisNet
-                self.model = BaseVisNet(device = self.device,
+                model = BaseVisNet(device = self.device,
                                 dtype = self.dtype,
                                 nn_params = nn_params,
                                 gnn_params = gnn_params)
             elif model_name_upper == 'TENSORNET':
                 from base.models.base_tensornet import BaseTensorNet
-                self.model = BaseTensorNet(device = self.device,
+                model = BaseTensorNet(device = self.device,
                                 dtype = self.dtype,
                                 nn_params = nn_params,
                                 gnn_params = gnn_params)
             else:
                 raise NotImplementedError('Supported model: ET, DET, VISNET')
+            model.load_state_dict(state_dict)
+        return model
 
-            self.model.load_state_dict(state_dict)
-
-        # now model is fully loaded, start to register parameters
-        named_parameters = self.model.named_parameters()
-        self.params_t = OrderedDict()
-        for name, param in named_parameters:
-            self.params_t[name] = param
-        self.params = t2j_pytree(self.params_t)
-        for k in self.params:
-            # set mask to all true
-            paramset.addParameter(self.params[k], k, field=self.name, mask=jnp.ones(self.params[k].shape))
-
-        self.params_noopt = OrderedDict()
-        state_dict = self.model.state_dict()
-        for k in state_dict:
-            if k not in self.params_t:
-                self.params_noopt[k] = state_dict[k]
-
-        return
 
     def getName(self) -> str:
         return self.name
@@ -307,9 +312,12 @@ class BASEGenerator:
             for k in self.params_noopt:
                 state_dict[k] = self.params_noopt[k]
 
-            self.model.load_state_dict(state_dict)
-            results = self.model.forward(input)
-            return results
+            # build a model object for every invokation to avoid gradient accumulation
+            # model = self._initialize_model()
+            model = copy.deepcopy(self.model)
+            model.load_state_dict(state_dict)
+            results = model.forward(input)
+            return results, model
 
         # jax wrapper
         @partial(jax.custom_vjp, nondiff_argnums=(2,))
@@ -317,7 +325,7 @@ class BASEGenerator:
             position_t = j2t(position)
             box_t = j2t(box)
             params_t = j2t_pytree(params)
-            result = potential_torch_kernel(position_t, box_t, None, params_t)
+            result, model = potential_torch_kernel(position_t, box_t, None, params_t)
             return t2j(result['pred_energy'][0]) * EV2KJ
 
         def potential_fwd(positions, box, pairs, params):
@@ -328,8 +336,8 @@ class BASEGenerator:
             position_t.requires_grad_(False)
             box_t.requires_grad_(False)
             params_t = j2t_pytree(params)
-            result = potential_torch_kernel(position_t, box_t, None, params_t)
-            self.model.zero_grad()
+            result, model = potential_torch_kernel(position_t, box_t, None, params_t)
+            model.zero_grad()
             result['pred_energy'].backward()
 
             inputs = {'pos': positions,
@@ -337,15 +345,20 @@ class BASEGenerator:
                       'params': params
                     }
             energy = t2j(result['pred_energy'][0])
-            return energy*EV2KJ, (t2j_pytree(result), inputs) #, dE_dp)
+            dE_dp = jax.tree.map(lambda x: jnp.zeros(x.shape), inputs['params'])
+            # read parameter gradient from the model
+            for name, param in model.named_parameters():
+                dE_dp[self.name][name] = t2j_extract_grad(param)
+            return energy*EV2KJ, (t2j_pytree(result), inputs, dE_dp)
 
         def potential_bwd(pairs, res, g):
             preds = res[0]
             inputs = res[1]
-            dE_dp = jax.tree.map(lambda x: jnp.zeros(x.shape), inputs['params'])
-            # read parameter gradient from the model
-            for name, param in self.model.named_parameters():
-                dE_dp[self.name][name] = t2j_extract_grad(param)
+            dE_dp = res[2]
+            # dE_dp = jax.tree.map(lambda x: jnp.zeros(x.shape), inputs['params'])
+            # # read parameter gradient from the model
+            # for name, param in model.named_parameters():
+            #     dE_dp[self.name][name] = t2j_extract_grad(param)
             force = preds['pred_forces']
             # virial is -V\tau
             virial = preds['pred_virial'][0] # in eV

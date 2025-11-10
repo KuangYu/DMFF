@@ -1,6 +1,6 @@
 Metadata-Version: 2.1
 Name: dmff
-Version: 0.0.0
+Version: 0.1.dev1+gc321c29b9.d20251110
 Summary: Differentiable Molecular Force Field
 Home-page: https://github.com/deepmodeling/DMFF
 Author: DeepModeling

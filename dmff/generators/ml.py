@@ -329,6 +329,7 @@ class BASEGenerator:
             box_t.requires_grad_(False)
             params_t = j2t_pytree(params)
             result = potential_torch_kernel(position_t, box_t, None, params_t)
+            self.model.zero_grad()
             result['pred_energy'].backward()
 
             inputs = {'pos': positions,
@@ -382,6 +383,7 @@ class BASEGenerator:
         image = torch.tensor(image, dtype=self.dtype)
         # edge_shift with periodicity correction
         edge_shift = pos[neighbor_index] - pos[center_index] + image @ lattice_tensor # cart coord
+
         center_index = torch.tensor(center_index, dtype=torch.long)
         neighbor_index = torch.tensor(neighbor_index, dtype=torch.long)
         return center_index, neighbor_index, edge_shift, image

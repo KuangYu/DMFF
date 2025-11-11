@@ -277,9 +277,14 @@ class BASEGenerator:
         self.input['cumsum_atom'] = torch.tensor([0, self.n_atoms])
 
         # torch kernel
-        def potential_torch_kernel(positions, box, pairs, params):
+        def potential_torch_kernel(positions, box, pairs, params, filter_atoms=None, flambda=0.0):
             # Assuming all inputs are in torch tensor
             # Note here we build another pair list, the input variable pairs is only a placeholder
+            if filter_atoms is None:
+                filter_atoms = torch.tensor(np.ones(positions.shape[0]), dtype=torch.int16)
+            else:
+                filter_atoms = torch.tensor(filter_atoms, dtype=torch.int16)
+            flambda = torch.tensor(flambda)
             crys_keys = ['lattice', 'cumsum_atom', 'cumsum_edge']
             atom_keys = ['pos', 'atom_types']
             edge_keys = ['center_index', 'neighbor_index', 'edge_shift', 'image']
@@ -294,7 +299,19 @@ class BASEGenerator:
             center_index, neighbor_index, edge_shift, image = self.get_edge(structure, input['pos'], input['lattice'], self.rc)
             input['center_index'] = center_index
             input['neighbor_index'] = neighbor_index
+            
+            # shifting edges, turn-off interactions between ghost atoms and other atoms
+            # used for ghost atom simulations
+            filter1 = filter_atoms[center_index]
+            filter2 = filter_atoms[neighbor_index]
+            filter_edges = filter1 * filter2
+            scale_edge = (1-filter_edges) * 1.0e6 + filter_edges
+            input['filter_atoms'] = filter_atoms
+            input['flambda'] = flambda
+            edge_shift = edge_shift * scale_edge[:, torch.newaxis]
+
             input['edge_shift'] = edge_shift
+            # shift
             input['image'] = image
             n_edges = len(center_index)
             input['cumsum_edge'] = torch.tensor([0, n_edges])
@@ -320,15 +337,27 @@ class BASEGenerator:
             return results, model
 
         # jax wrapper
-        @partial(jax.custom_vjp, nondiff_argnums=(2,))
-        def potential_fn(position, box, pairs, params):
+        @partial(jax.custom_vjp, nondiff_argnums=(2,4,5))
+        def potential_fn(position, box, pairs, params, filter_atoms=None, flambda=0.0):
+            '''
+            potential with ghost atoms
+            positions: atom positions (the full dimensional array including ghost atoms)
+            box: box size (3x3 matrix, lattice vector arranged in rows)
+            pairs: atom pairs, simply use None for BASE
+            filter_atoms: a numpy array using 1/0 to label real/ghost atoms
+            flambda: a scaling factor used to control the magnitude of the ghost-atom interactions
+                     flambda = 1.0 means full interaction, 0.0 means no interaction
+                     Right now it is simply a placeholder, detailed swithing mechanism is not implemented
+            '''
             position_t = j2t(position)
             box_t = j2t(box)
             params_t = j2t_pytree(params)
-            result, model = potential_torch_kernel(position_t, box_t, None, params_t)
+            result, model = potential_torch_kernel(position_t, box_t, None, params_t, 
+                                                   filter_atoms=filter_atoms,
+                                                   flambda=flambda)
             return t2j(result['pred_energy'][0]) * EV2KJ
 
-        def potential_fwd(positions, box, pairs, params):
+        def potential_fwd(positions, box, pairs, params, filter_atoms=None, flambda=0.0):
             # gradient of positions and box will be computed internally and returned
             # by force an virial
             position_t = j2t(positions).detach()
@@ -336,7 +365,9 @@ class BASEGenerator:
             position_t.requires_grad_(False)
             box_t.requires_grad_(False)
             params_t = j2t_pytree(params)
-            result, model = potential_torch_kernel(position_t, box_t, None, params_t)
+            result, model = potential_torch_kernel(position_t, box_t, None, params_t, 
+                                                   filter_atoms=filter_atoms,
+                                                   flambda=flambda)
             model.zero_grad()
             result['pred_energy'].backward()
 
@@ -351,7 +382,7 @@ class BASEGenerator:
                 dE_dp[self.name][name] = t2j_extract_grad(param)
             return energy*EV2KJ, (t2j_pytree(result), inputs, dE_dp)
 
-        def potential_bwd(pairs, res, g):
+        def potential_bwd(pairs, filter_atoms, flambda, res, g):
             preds = res[0]
             inputs = res[1]
             dE_dp = res[2]

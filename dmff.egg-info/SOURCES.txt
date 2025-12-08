@@ -130,6 +130,7 @@ dmff/__init__.py
 dmff/_date.py
 dmff/_version.py
 dmff/difftraj.py
+dmff/eapnn.py
 dmff/mbar.py
 dmff/optimize.py
 dmff/settings.py

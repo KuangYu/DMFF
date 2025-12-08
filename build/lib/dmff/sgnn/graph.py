@@ -3,6 +3,7 @@ from functools import partial
 from itertools import permutations, product
 
 import jax.numpy as jnp
+import json
 # import MDAnalysis as mda
 try:
     import mdtraj as md
@@ -38,7 +39,7 @@ This module works on building graphs based on molecular topology
 #         }
 ATYPE_INDEX = {'H': 0, 'C': 1, 'O': 2}
 # ATYPE_INDEX = {'H': 0, 'B':1, 'C': 2, 'N': 3 , 'O': 4, 'F': 5, 'P': 6, 'S':7 }
-N_ATYPES = len(ATYPE_INDEX.keys())
+#N_ATYPES = len(ATYPE_INDEX.keys())
 
 # used to compute equilibrium bond lengths
 # COVALENT_RADIUS = {'H': 0.31, 'C': 0.76, 'N': 0.71, 'O': 0.66, 'S': 1.05, }
@@ -62,7 +63,20 @@ DIM_BOND_FEATURES_GEOM = {
 }
 DIM_BOND_FEATURES_GEOM_TOT = np.sum(
     [DIM_BOND_FEATURES_GEOM[k] for k in DIM_BOND_FEATURES_GEOM.keys()])
-DIM_BOND_FEATURES_ATYPES = MAX_VALENCE * 2 * N_ATYPES
+# DIM_BOND_FEATURES_ATYPES = MAX_VALENCE * 2 * N_ATYPES
+
+
+def set_sgnn_config(config_path):
+    global ATYPE_INDEX
+    global COVALENT_RADIUS
+    with open(config_path, 'r') as ifile:
+        config = json.load(ifile)
+    ATYPE_INDEX = config['ATYPE_INDEX']
+    COVALENT_RADIUS = config['COVALENT_RADIUS']
+    # update module settings
+    # dmff.sgnn.graph.ATYPE_INDEX = ATYPE_INDEX
+    # dmff.sgnn.graph.COVALENT_RADIUS = COVALENT_RADIUS
+    return
 
 
 class TopGraph:
@@ -533,7 +547,6 @@ class TopGraph:
 
     def prepare_subgraph_feature_calc(self, 
             max_valence=MAX_VALENCE, 
-            atype_index=ATYPE_INDEX,
             fscale_bond=FSCALE_BOND,
             fscale_angle=FSCALE_ANGLE
             ):
@@ -559,8 +572,8 @@ class TopGraph:
         '''
 
         # system dependent dimension parameters
-        self.atype_index = atype_index
-        self.n_atypes = len(atype_index.keys())
+        self.atype_index = ATYPE_INDEX # atype_index
+        self.n_atypes = len(self.atype_index.keys())
         self.fscale_bond = fscale_bond
         self.fscale_angle = fscale_angle
         self.max_valence = max_valence

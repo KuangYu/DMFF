@@ -58,7 +58,6 @@ class MolGNNForce:
                  mu=117.41975505778706,
                  seed=12345,
                  max_valence=MAX_VALENCE,
-                 atype_index=ATYPE_INDEX,
                  fscale_bond=FSCALE_BOND,
                  fscale_angle=FSCALE_ANGLE
                  ):
@@ -95,11 +94,12 @@ class MolGNNForce:
         fscale_angle: float, optional
             The scaling factor for angle features, use value in graph.py by default
         """
+        atype_index = ATYPE_INDEX
         self.nn = nn
         self.G = G
         self.G.get_all_subgraphs(nn, typify=True)
         self.G.prepare_subgraph_feature_calc(max_valence=max_valence,
-                atype_index=atype_index,
+                                             #atype_index=atype_index,
                 fscale_bond=fscale_bond,
                 fscale_angle=fscale_angle)
         params = OrderedDict()

@@ -37,3 +37,6 @@ if __name__ == '__main__':
     print('Position Gradient:')
     print(rgrad)
 
+    # saving new parameters
+    gen = H.getGenerators()[0]
+    gen.write_to(params, 'new.pt', 'new_sd.pt')

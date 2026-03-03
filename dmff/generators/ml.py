@@ -286,9 +286,9 @@ class BASEGenerator:
             # Assuming all inputs are in torch tensor
             # Note here we build another pair list, the input variable pairs is only a placeholder
             if filter_atoms is None:
-                filter_atoms = torch.tensor(np.ones(positions.shape[0]), dtype=torch.int16)
+                filter_atoms = torch.tensor(np.ones(positions.shape[0]), dtype=torch.int16, device=self.device)
             else:
-                filter_atoms = torch.tensor(filter_atoms, dtype=torch.int16)
+                filter_atoms = torch.tensor(filter_atoms, dtype=torch.int16, device=self.device)
             flambda = torch.tensor(flambda)
             crys_keys = ['lattice', 'cumsum_atom', 'cumsum_edge']
             atom_keys = ['pos', 'atom_types']
@@ -298,10 +298,16 @@ class BASEGenerator:
             # input in nm, convert to A
             input['lattice'] = box * 10
             input['pos'] = positions * 10
-            structure = pymatgen.core.structure.Structure(input['lattice'], self.input['atom_types'], input['pos'], 0,
+            structure = pymatgen.core.structure.Structure(input['lattice'].cpu(), 
+                                                          self.input['atom_types'].cpu(), 
+                                                          input['pos'].cpu(), 
+                                                          0,
                                                           coords_are_cartesian=True)
 
-            center_index, neighbor_index, edge_shift, image = self.get_edge(structure, input['pos'], input['lattice'], self.rc)
+            center_index, neighbor_index, edge_shift, image = self.get_edge(structure,
+                                                                            input['pos'].to(self.device),
+                                                                            input['lattice'].to(self.device),
+                                                                            self.rc)
             input['center_index'] = center_index
             input['neighbor_index'] = neighbor_index
             
@@ -328,16 +334,13 @@ class BASEGenerator:
 
             # load parameter to model
             if self.name in params.keys():
-                state_dict = copy.deepcopy(params[self.name])
+                state_dict = params[self.name]
             else:
-                state_dict = copy.deepcopy(params)
-            for k in self.params_noopt:
-                state_dict[k] = self.params_noopt[k]
+                state_dict = params
 
             # build a model object for every invokation to avoid gradient accumulation
-            # model = self._initialize_model()
-            model = copy.deepcopy(self.model)
-            model.load_state_dict(state_dict)
+            model = self._initialize_model()
+            model.load_state_dict(state_dict, strict=False)
             results = model.forward(input)
             return results, model
 
@@ -411,10 +414,7 @@ class BASEGenerator:
 
         return potential_fn
 
-    def overwrite(self, params):
-        # do not use xml to handle ML potentials
-        # for ML potentials, xml only documents param file path
-        # so for ML potentials, overwrite function overwrites the file directly
+    def write_to(self, params, state_dict_file):
         if 'BASEForce' in params:
             self.params = params['BASEForce']
         else:
@@ -423,18 +423,25 @@ class BASEGenerator:
         state_dict = copy.deepcopy(self.params_t)
         for k in self.params_noopt:
             state_dict[k] = self.params_noopt[k]
-        torch.save(state_dict, self.state_dict_file)
+        torch.save(state_dict, state_dict_file)
+        return
+
+    def overwrite(self, params):
+        # do not use xml to handle ML potentials
+        # for ML potentials, xml only documents param file path
+        # so for ML potentials, overwrite function overwrites the file directly
+        self.write_to(params, self.state_dict_file)
         return
 
     def get_edge(self, structure, pos, lattice_tensor, cutoff):
         pos = pos.clone().detach()
         center_index, neighbor_index, image, distance = structure.get_neighbor_list(r=cutoff, sites=structure.sites, numerical_tol=1e-8)
-        image = torch.tensor(image, dtype=self.dtype)
+        image = torch.tensor(image, dtype=self.dtype, device=self.device)
         # edge_shift with periodicity correction
         edge_shift = pos[neighbor_index] - pos[center_index] + image @ lattice_tensor # cart coord
 
-        center_index = torch.tensor(center_index, dtype=torch.long)
-        neighbor_index = torch.tensor(neighbor_index, dtype=torch.long)
+        center_index = torch.tensor(center_index, dtype=torch.long, device=self.device)
+        neighbor_index = torch.tensor(neighbor_index, dtype=torch.long, device=self.device)
         return center_index, neighbor_index, edge_shift, image
 
     def getJaxPotential(self):
@@ -534,15 +541,13 @@ class CustomTorchGenerator:
 
             # load parameter to model
             if self.name in params.keys():
-                state_dict = copy.deepcopy(params[self.name])
+                state_dict = params[self.name]
             else:
-                state_dict = copy.deepcopy(params)
-            for k in self.params_noopt:
-                state_dict[k] = self.params_noopt[k]
+                state_dict = params
 
             # build a model object for every invokation to avoid gradient accumulation
-            model = copy.deepcopy(self.model)
-            model.load_state_dict(state_dict)
+            model = self._initialize_model()
+            model.load_state_dict(state_dict, strict=False)
             results = model.forward(positions, box, self.atom_types)
             return results, model
 

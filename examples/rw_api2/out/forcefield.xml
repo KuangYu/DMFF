@@ -1,0 +1,3 @@
+<ForceField>  
+    <BASEForce ckpt="/mnt/bn/byteff-dev-large/users/kuangyu/DMFF/examples/rw_api/out/epoch_741_loss_145.pt"/>
+</ForceField>

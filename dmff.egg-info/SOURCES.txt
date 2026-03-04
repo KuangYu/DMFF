@@ -1,3 +1,4 @@
+AGENTS.md
 LICENSE
 Makefile
 README.md
@@ -874,6 +875,11 @@ examples/peg_slater_isa/res_tot.xvg
 examples/peg_slater_isa/residues.xml
 examples/peg_slater_isa/run_amoeba.py
 examples/peg_slater_isa/tot_slater.xml
+examples/rw_api/run.py
+examples/rw_api/out/POSCAR_mp757441
+examples/rw_api/out/epoch_741_loss_145.pt
+examples/rw_api/out/forcefield.xml
+examples/rw_api/out/mp757441.pdb
 examples/sgnn/PF6.pdb
 examples/sgnn/model1.pickle
 examples/sgnn/peg.xml
@@ -909,8 +915,6 @@ examples/torch_kernel/torch_mlp_frontend/new_sd.pt
 examples/torch_kernel/torch_mlp_frontend/residues.xml
 examples/torch_kernel/torch_mlp_frontend/run.py
 examples/torch_kernel/torch_mlp_frontend/structure.pdb
-examples/torch_kernel/torch_mlp_frontend/__pycache__/force_model.cpython-311.pyc
-examples/torch_kernel/torch_mlp_frontend/__pycache__/make_model.cpython-311.pyc
 examples/tutorial_utils/tutorial_utils.py
 examples/tutorial_utils/data/ala2_fixed.pdb
 examples/tutorial_utils/data/analytical_pot.pdb
@@ -949,8 +953,6 @@ examples/water_fullpol/quadrupole_nonpol/run.py
 examples/water_fullpol/quadrupole_nonpol/test.py
 examples/water_fullpol/quadrupole_nonpol/water_dimer.pdb
 examples/water_fullpol/quadrupole_nonpol/waterbox_31ang.pdb
-finetune/ft.py
-finetune/lat_param_opt.py
 package/docker/develop_cpu.dockerfile
 package/docker/develop_gpu.dockerfile
 tests/.gitkeep
@@ -1113,5 +1115,8 @@ tests/test_frontend/test_operators.py
 tests/test_frontend/test_sum.py
 tests/test_frontend/test_xmlio.py
 tests/test_mbar/test_mbar.py
+tests/test_mbar/test_mbar_new.py
+tests/test_mbar/test_rw.py
 tests/test_mbar/test_state.py
+tests/test_mbar/test_state_new.py
 tests/test_sgnn/test_energy.py

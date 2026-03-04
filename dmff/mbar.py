@@ -869,6 +869,8 @@ class ReweightEstimator:
             )
         self.sample = sample
         self.state = state
+        # Ensure reference energies are available
+        self.compute_energy_matrix()
 
     def remove_sample_and_state(self):
         """Detach any currently stored sample/state pair."""
@@ -883,7 +885,7 @@ class ReweightEstimator:
             raise ValueError("Sample and state must be set before computing energies.")
         self.sample.generate_energy([self.state])
 
-    def estimate_weight(self, target_state, params, base_energies=0.0):
+    def estimate_weight(self, target_state, params, base_energies=0.0, calc_uref=False):
         """Estimate reweighting factors for a new target state.
 
         Parameters
@@ -924,7 +926,8 @@ class ReweightEstimator:
             )
 
         # Ensure reference energies are available
-        self.compute_energy_matrix()
+        if calc_uref:
+            self.compute_energy_matrix()
 
         # Target reduced potential u_new (shape: n_frames,)
         unew = target_state.calc_energy(self.sample.trajectory, params)

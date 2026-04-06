@@ -1,6 +1,6 @@
-Metadata-Version: 2.4
+Metadata-Version: 2.1
 Name: dmff
-Version: 0.1.dev12+gc0824d9b7.d20260305
+Version: 0.1.dev13+g330ee0ac5.d20260406
 Summary: Differentiable Molecular Force Field
 Home-page: https://github.com/deepmodeling/DMFF
 Author: DeepModeling
@@ -11,26 +11,6 @@ Classifier: License :: OSI Approved :: GNU Lesser General Public License v3 (LGP
 Requires-Python: ~=3.8
 Description-Content-Type: text/markdown
 License-File: LICENSE
-Requires-Dist: numpy>=1.18
-Requires-Dist: jax>=0.4.1
-Requires-Dist: openmm>=7.6.0
-Requires-Dist: freud-analysis
-Requires-Dist: networkx>=3.0
-Requires-Dist: optax>=0.1.4
-Requires-Dist: jaxopt>=0.8.0
-Requires-Dist: pymbar>=4.0.0
-Requires-Dist: tqdm
-Dynamic: author
-Dynamic: author-email
-Dynamic: classifier
-Dynamic: description
-Dynamic: description-content-type
-Dynamic: home-page
-Dynamic: keywords
-Dynamic: license-file
-Dynamic: requires-dist
-Dynamic: requires-python
-Dynamic: summary
 
 # DMFF
 

@@ -1,232 +1,209 @@
-## DMFF Codebase High-Level Architecture Overview
+# DMFF Architecture Overview for Agents
 
-This document targets humans/agents who need to develop, refactor, test, or debug in the DMFF codebase. It summarizes the project purpose, core architecture, build and test flows, and configuration/security information that is explicitly present in the repository.
+This document summarizes the architecture and workflows of the DMFF codebase to help agents and developers navigate the project for development, refactoring, testing, and debugging.
 
-> All descriptions here are derived from this repository itself (for example `README.md`, `docs/`, `dmff/`, `backend/`), without introducing external or generic development practices.
+## 1. Project Overview
 
----
+- **Purpose**
+  - DMFF (Differentiable Molecular Force Field) is a JAX-based Python package for differentiable molecular force fields, focusing on molecular systems such as water, biomolecules, polymers, and small organic molecules (`README.md:5-9`).
+  - It combines OpenMM-based topology/parameter handling with JAX/XLA-backed energy and gradient evaluation to support parameter optimization, hybrid ML/force-field models, and trajectory-based fitting (`README.md:7-10`, `docs/dev_guide/introduction.md:11-19`).
 
-### 1. Project Overview
+- **High-Level Architecture**
+  - **Python package `dmff/`**
+    - Public API surface is re-exported in `dmff/__init__.py:1-7` (settings, neighbor lists, generators, `Hamiltonian`, operators, MD tools).
+    - Global numerical configuration (precision, JIT, debug) lives in `dmff/settings.py:1-19` and is applied at import time via `jax.config.update`.
+  - **API / Frontend layer (`dmff/api/`)**
+    - `Hamiltonian` (`dmff/api/hamiltonian.py:38-137`) loads one or more OpenMM-compatible XML force-field files via `XMLIO`, builds an internal `ParamSet`, and instantiates registered force generators for each `<Force>`.
+    - `DMFFTopology` (`dmff/api/topology.py:41-418`) wraps OpenMM `Topology`, RDKit molecules, or SDF files into a unified topology object with bonds, residues, virtual sites, and periodic box vectors.
+    - `DMFFTopology.buildCovMat` and `buildVSiteUpdateFunction` (`dmff/api/topology.py:391-519`) precompute covalent maps and JAX functions that update virtual-site coordinates prior to energy evaluation.
+    - `Hamiltonian.createPotential` returns a `Potential` object (`dmff/api/hamiltonian.py:38-71, 104-128`) that aggregates per-term JAX energy functions and exposes `getPotentialFunc` to obtain a total-energy callable over positions, box, neighbor pairs, and parameters.
+  - **Force-field generators and calculators**
+    - Individual force families live in dedicated subpackages: `dmff/admp`, `dmff/classical`, `dmff/sgnn`, `dmff/eann`, `dmff/generators`, and `dmff/operators` (`README.md:51-60`, `docs/dev_guide/convention.md:17-22`).
+    - Generators map XML-defined forces into parameter arrays and JAX-pure energy kernels ("calculators"), following the specs described in the developer guide (`docs/dev_guide/introduction.md:11-19`).
+  - **Neighbor list and common utilities**
+    - High-level neighbor lists are defined in `dmff/common/nblist.py:1-230`, with implementations backed by freud (`NeighborListFreud`) and an optional dpnblist backend (`NeighborListDp`).
+    - Neighbor lists produce padded pair arrays augmented with a covalent-neighborhood tag derived from the covalent map (`dmff/common/nblist.py:31-35, 91-94, 152-155`).
+    - A pure-Python neighbor list without freud/dpnblist support is provided via `NoCutoffNeighborList` and `NoPeriodicNeighborList` (`dmff/common/nblist.py:145-230`).
+  - **Differentiable MD and optimization**
+    - `dmff/difftraj.py:1-242` defines `Loss_Generator`, which wraps a user-defined observable `f_nout` and an energy function into a reversible velocity-Verlet integrator. It exposes a custom-JVP loss function whose gradients are propagated through MD trajectories using adjoint sensitivity.
+    - Additional optimization and analysis utilities live in `dmff/optimize.py` and `dmff/mbar.py` (referenced by the user guide `docs/user_guide/4.6MBAR.md`, `docs/user_guide/4.6Optimization.md`).
+  - **C++ / CUDA neighbor-list backend (`dmff/dpnblist/`)**
+    - Implements a reusable neighbor-list library with cell, octree, and hash algorithms on CPU and optionally CUDA (`dmff/dpnblist/README.md:1-12`).
+    - Built as a pybind11 extension module `dpnblist` via CMake (`dmff/dpnblist/CMakeLists.txt:1-48`), and consumed from Python in `dmff/common/nblist.py:19-27`.
+  - **OpenMM-DMFF plugin backend (`backend/openmm_dmff_plugin/`)**
+    - Provides an OpenMM `Force` that wraps a TensorFlow-exported DMFF model (`backend/openmm_dmff_plugin/README.md:1-6`).
+    - Includes platform-specific C++/CUDA implementations under `backend/openmm_dmff_plugin/platforms/` and a Python package `OpenMMDMFFPlugin` for higher-level usage and tests.
+  - **Documentation, examples, and tests**
+    - Markdown documentation and mkdocs configuration live in `docs/` and `mkdocs.yml:1-47` (site nav, mkdocstrings, and math support).
+    - End-to-end and tutorial examples are under `examples/` and referenced from `README.md:48-60` and user guide notebooks.
+    - Python unit and integration tests live in `tests/` organized by module (`README.md:51`, `Makefile:1-31`). C++ tests for `dpnblist` and the OpenMM plugin live under `dmff/dpnblist/tests/` and `backend/openmm_dmff_plugin/*/tests/` respectively.
 
-- **Goal and Scope**  
-  - DMFF (Differentiable Molecular Force Field) is a JAX-based Python package that provides a fully differentiable implementation of molecular force-field models, enabling parameter optimization and efficient energy/force evaluation for systems such as water, biomacromolecules, organic polymers, and small organic molecules `README.md:5`, `docs/index.md:5`.
-  - It supports conventional point-charge models (OPLS/AMBER-like) and multipolar polarizable models (AMOEBA/MPID-like), and is designed to integrate modern machine-learning optimization techniques for automated parameterization and trajectory-based optimization `README.md:7-10`, `docs/dev_guide/introduction.md:11-19`.
+## 2. Build & Commands
 
-- **Core Layered Architecture (Python)**
-  - **Top-level package entry `dmff`**  
-    - `dmff/__init__.py:1-6` re-exports key objects:
-      - Global settings: `dmff.settings` (numeric precision, JIT flag, debug flag);
-      - Neighbor-list utilities: `dmff.common.nblist.NeighborList` / `NeighborListFreud`;
-      - Force-field generators: `dmff.generators`;
-      - System Hamiltonian: `dmff.api.Hamiltonian`;
-      - Topology operators and MD tools: `dmff.operators`, `dmff.mdtools`.
-  - **API layer: Hamiltonian & topology**  
-    - `dmff/api/__init__.py:1-2` exposes two core classes: `Hamiltonian` and `DMFFTopology`.
-      - `Hamiltonian` encapsulates total energy/force, etc.;
-      - `DMFFTopology` represents topology and parameter data for a system.
-  - **Generators and Calculators**  
-    - `dmff/generators/__init__.py:1-4` aggregates the submodules `classical`, `admp`, `ml`, and `qeq`, each corresponding to a particular potential form.
-    - `docs/dev_guide/introduction.md:11-18` describes the division of responsibilities:
-      - `Generator` loads and organizes parameters from force-field XML files;
-      - **Calculators** are pure, heavy-duty functions that take atomic positions and force-field parameters as input and return energies; they are JAX-differentiable and JIT-compilable.
-  - **Runtime settings**  
-    - `dmff/settings.py:3-7` defines:
-      - `PRECISION` (e.g. `'double'`) controlling JAX 64-bit precision;
-      - `DO_JIT` controlling whether to JIT-compile core computations;
-      - `DEBUG` controlling debug behavior;
-      - `update_jax_precision()` updates the global JAX `jax_enable_x64` flag at import time `dmff/settings.py:10-19`.
-  - **Operators pipeline**  
-    - `dmff/operators/base.py:4-12` defines `BaseOperator`:
-      - `__call__` accepts a `DMFFTopology` and delegates to `operate`;
-      - subclasses in `dmff/operators/` implement topology/parameter transformations (e.g. typing, virtual sites, AM1 charges) in a pipeline-like fashion.
-  - **Neighbor list and backend acceleration**  
-    - Python-level neighbor list: `dmff/common/nblist.py` (not expanded here, but exported in `dmff/__init__.py:2`).
-    - C++/CUDA backend: `dmff/dpnblist/` provides a high-performance neighbor-list library with CPU/GPU scheduling algorithms and doctest-based tests `dmff/dpnblist/tests/CMakeLists.txt:1-38`.
+### 2.1 Python package and environment
 
-- **ADMP and Classical force-field architecture (from docs)**  
-  - `docs/assets/DMFF_arch.md:1-26` outlines a three-part architecture:
-    - **Parser & typification**:
-      - Input: force-field XML file;
-      - `parseElement` parses XML and builds **Generators**;
-      - `createPotential` produces an intermediate representation containing atomic/topological parameters.
-    - **Calculators layer**:
-      - ADMP: General Pairwise Calculator, Multipole PME Calculator, Dispersion PME Calculator;
-      - Classical: Intramolecular and Intermolecular calculators;
-      - All calculators expose a unified energy API `potential(pos, box, pairs, params)` which is JAX-differentiable.
-    - **Neighbor list and parameter coupling**:
-      - Neighbor pairs `pairs` come from a jax-md-style neighbor list (edge `J -> I` in the diagram);
-      - Generator outputs (differentiable parameters) feed into the calculators.
+- **Environment creation and core dependencies** (from `docs/user_guide/2.installation.md:3-33`)
+  - Create and activate a conda environment:
+    - `conda create -n dmff python=3.9 --yes`
+    - `conda activate dmff`
+  - Install JAX (choose CPU or GPU wheel):
+    - CPU: `pip install "jax[cpu]==0.4.14"`
+    - GPU: `pip install "jax[cuda11_local]==0.4.14" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html`
+  - Install MD and optimization dependencies:
+    - `conda install -c conda-forge mdtraj==1.9.7`
+    - `pip install optax==0.1.3 jaxopt==0.8.1 pymbar==4.0.1` (exact versions vary across docs but are pinned in `docs/user_guide/2.installation.md:15-25`).
+  - Install OpenMM and RDKit:
+    - `conda install -c conda-forge openmm==7.7.0`
+    - `conda install -c conda-forge rdkit`
 
-- **OpenMM plugin backend**  
-  - `backend/openmm_dmff_plugin/README.md:1-4` describes an OpenMM plugin that embeds a trained DMFF JAX model as an OpenMM `Force` for molecular dynamics.
-  - Installation requires `libtensorflow_cc`, `cppflow`, and CMake; the plugin builds `DMFFForce`-related kernels under `backend/openmm_dmff_plugin/openmmapi/` and `backend/openmm_dmff_plugin/platforms/` (file-level details are omitted here).
-
-- **Documentation and examples**  
-  - Documentation: MkDocs-based site with navigation defined in `mkdocs.yml:1-27` and `docs/index.md:17-39`.
-  - Examples: `examples/` provides runnable examples for Classical, ADMP, MLForce, OpenMM plugin, DiffTraj, etc. `README.md:48-57`, `docs/user_guide/3.usage.md`.
-
-Currently there is no existing `AGENT.md` / `AGENTS.md`, and no `.cursor/rules/`, `.trae/rules/`, or `.github/copilot-instructions.md` files have been detected in this repository.
-
----
-
-### 2. Build & Commands
-
-This section lists only commands and tools that appear explicitly in the repository.
-
-- **Install from source (Python package)**  
-  - Installing DMFF from source `docs/user_guide/2.installation.md:35-40`:
+- **Install DMFF from source** (`docs/user_guide/2.installation.md:35-40`)
+  - Clone and install:
     - `git clone https://github.com/deepmodeling/DMFF.git`
     - `cd DMFF`
     - `pip install . --user`
-  - Dependency installation (partial):
-    - Conda environment creation and installation of JAX, mdtraj, optax, jaxopt, pymbar, OpenMM, RDKit, etc. See `docs/user_guide/2.installation.md:3-33` for exact commands.
+  - The same `pip install .` command is used when developing locally (also reflected in `setup.py:34-58`).
 
-- **Python tests (pytest)**  
-  - The root `Makefile:1-31` defines per-module pytest targets, all using `pytest --disable-warnings`:
-    - `make test_admp` → `pytest --disable-warnings tests/test_admp`;
-    - `make test_classical` → `pytest --disable-warnings tests/test_classical`;
-    - `make test_common` → `pytest --disable-warnings tests/test_common`;
-    - `make test_difftraj` → `pytest --disable-warnings tests/test_difftraj`;
-    - `make test_dimer` → `pytest --disable-warnings tests/test_dimer`;
-    - `make test_frontend` → `pytest --disable-warnings tests/test_frontend`;
-    - `make test_mbar` → `pytest --disable-warnings tests/test_mbar`;
-    - `make test_sgnn` → `pytest --disable-warnings tests/test_sgnn`;
-    - `make test_energy` → `pytest --disable-warnings tests/test_energy.py`;
-    - `make test_utils` → `pytest --disable-warnings tests/test_utils.py`.
+- **Python test commands** (`Makefile:1-31`)
+  - The top-level `test` target runs all Python tests:
+    - `make test` (aggregates module-specific targets).
+  - Module-scoped targets (all use `pytest --disable-warnings`):
+    - `make test_admp` → `pytest --disable-warnings tests/test_admp`
+    - `make test_classical` → `pytest --disable-warnings tests/test_classical`
+    - `make test_common` → `pytest --disable-warnings tests/test_common`
+    - `make test_difftraj` → `pytest --disable-warnings tests/test_difftraj`
+    - `make test_dimer` → `pytest --disable-warnings tests/test_dimer`
+    - `make test_frontend` → `pytest --disable-warnings tests/test_frontend`
+    - `make test_mbar` → `pytest --disable-warnings tests/test_mbar`
+    - `make test_sgnn` → `pytest --disable-warnings tests/test_sgnn`
+    - `make test_energy` → `pytest --disable-warnings tests/test_energy.py`
+    - `make test_utils` → `pytest --disable-warnings tests/test_utils.py`
 
-- **C++ neighbor-list backend (dpnblist) build & tests**  
-  - `dmff/dpnblist/CMakeLists.txt` (not expanded here) defines how to build the C++/CUDA neighbor-list library.
-  - Test executable `dpnblist_test` is defined in `dmff/dpnblist/tests/CMakeLists.txt:1-38`:
-    - `add_executable(dpnblist_test ...)` with multiple `test_*.cpp` sources;
-    - `find_package(doctest)` or a bundled `doctest.cmake` is used to enable doctest-based unit tests.
+- **Quick installation verification** (`docs/user_guide/2.installation.md:42-55`)
+  - Import checks in Python:
+    - `import dmff`
+    - `import dmff.admp`
+  - Run an example, e.g.:
+    - `cd examples/water_fullpol`
+    - `python run.py`
 
-- **OpenMM DMFF plugin build & tests**  
-  - Environment setup and build commands are documented in `backend/openmm_dmff_plugin/README.md:9-56`:
-    - Install `python`, `openmm`, `cudatoolkit`, and `libtensorflow_cc` via conda;
-    - Download TensorFlow sources and copy `tensorflow/c` headers into the conda environment to satisfy `cppflow` requirements;
-    - Set `OPENMM_INSTALLED_DIR`, `CPPFLOW_INSTALLED_DIR`, `LIBTENSORFLOW_INSTALLED_DIR`;
-    - In `backend/openmm_dmff_plugin/build`, run `cmake .. -DOPENMM_DIR=... -DCPPFLOW_DIR=... -DTENSORFLOW_DIR=...` and then `make && make install && make PythonInstall`.
-  - Python-level plugin tests `backend/openmm_dmff_plugin/README.md:58-62`:
+### 2.2 dpnblist neighbor-list backend
+
+- **Build and install** (`dmff/dpnblist/README.md:4-9`)
+  - From `dmff/dpnblist/`:
+    - `pip install .`
+  - This invokes CMake (`dmff/dpnblist/CMakeLists.txt:1-48`) to build the `dpnblist` pybind11 extension with optional CUDA support and installs it into the active Python environment.
+
+- **Key build characteristics** (`dmff/dpnblist/CMakeLists.txt:9-65`)
+  - If CUDA is available, GPU kernels are compiled (`hashSchAlgGPU.cu`, `octreeSchAlgGPU.cu`, `cellSchAlgGPU.cu`).
+  - Otherwise, a CPU-only configuration is used (`pywrap_CPU.cpp`, `nbList_CPU.cpp`).
+  - OpenMP and Python3 development headers are required and linked into the module.
+
+### 2.3 OpenMM–DMFF plugin backend
+
+- **Environment and dependencies** (`backend/openmm_dmff_plugin/README.md:9-37`)
+  - Create a separate conda environment for the plugin:
+    - `mkdir omm_dmff_working_dir && cd omm_dmff_working_dir`
+    - `conda create -n dmff_omm -c conda-forge python=3.9 openmm cudatoolkit=11.6`
+    - `conda activate dmff_omm`
+  - Install TensorFlow C++ runtime and headers:
+    - `conda install -y libtensorflow_cc=2.9.1 -c conda-forge`
+    - Download TensorFlow sources (`v2.9.1`), then copy the `tensorflow/c` headers into `${CONDA_PREFIX}/include/tensorflow/`.
+  - Install `cppflow` headers and apply the local patch `backend/openmm_dmff_plugin/tests/cppflow_empty_constructor.patch`.
+
+- **Build and install the plugin** (`backend/openmm_dmff_plugin/README.md:41-56`)
+  - Set environment variables and configure/build via CMake:
+    - `export OPENMM_INSTALLED_DIR=$CONDA_PREFIX`
+    - `export CPPFLOW_INSTALLED_DIR=$CONDA_PREFIX`
+    - `export LIBTENSORFLOW_INSTALLED_DIR=$CONDA_PREFIX`
+    - `cd DMFF/backend/openmm_dmff_plugin`
+    - `mkdir build && cd build`
+    - `cmake .. -DOPENMM_DIR=${OPENMM_INSTALLED_DIR} -DCPPFLOW_DIR=${CPPFLOW_INSTALLED_DIR} -DTENSORFLOW_DIR=${LIBTENSORFLOW_INSTALLED_DIR}`
+    - `make && make install`
+    - `make PythonInstall`
+
+- **Plugin tests** (`backend/openmm_dmff_plugin/README.md:58-62`)
+  - From the same environment, run:
     - `python -m OpenMMDMFFPlugin.tests.test_dmff_plugin_nve -n 100`
     - `python -m OpenMMDMFFPlugin.tests.test_dmff_plugin_nvt -n 100 --platform CUDA`
 
-- **Docs development & preview (MkDocs)**  
-  - Documentation framework: MkDocs `docs/dev_guide/write_docs.md:5`.
-  - Preview command `docs/dev_guide/write_docs.md:27-31`:
-    - In the directory containing `mkdocs.yml`, run `mkdocs serve` to start a local dev server with auto-reload.
+## 3. Code Style
 
----
+- **Project layout** (`docs/dev_guide/convention.md:10-22`, `README.md:44-57`)
+  - `dmff/`: main source tree (APIs, generators, operators, models, MD tools).
+  - `docs/`: Markdown-based documentation and mkdocs config.
+  - `examples/`: runnable, self-contained examples and notebooks.
+  - `tests/`: unit and integration tests organized by feature area.
+  - Under `dmff/`, each subpackage corresponds to a potential form or subsystem (e.g., `admp`, `classical`, `sgnn`, `eann`).
 
-### 3. Code Style
+- **Docstrings and type hints** (`docs/dev_guide/convention.md:24-27`) 
+  - Python docstrings follow **NumPy-style** conventions to integrate with Sphinx/napoleon and mkdocstrings.
+  - Public APIs should include type annotations; docstrings document parameters, returns, raises, and examples in NumPy style.
 
-This section collects only style guidelines that are explicitly stated in the repository.
+- **API design patterns**
+  - Calculators are expected to be **pure JAX functions** that take `(positions, box, pairs, params)` (plus optional aux data) and return energies; `Hamiltonian` wraps these into higher-level `Potential` objects (`dmff/api/hamiltonian.py:38-71, 114-127`).
+  - Topology handling is centralized in `DMFFTopology`, which exposes methods such as `buildCovMat`, `buildVSiteUpdateFunction`, `addVSiteToPos`, and equivalent-atom detection utilities (`dmff/api/topology.py:391-519, 521-769`).
 
-- **Code organization**  
-  - Root layout `docs/dev_guide/convention.md:10-15`:
-    - `dmff/`: project source code;
-    - `docs/`: Markdown documentation;
-    - `examples/`: standalone examples;
-    - `tests/`: unit and integration tests.
-  - Within `dmff/` `docs/dev_guide/convention.md:17-22`:
-    - `api.py`: API (frontend modules);
-    - `settings.py`: global settings;
-    - `utils.py`: basic utilities;
-    - each subdirectory corresponds to a potential form (e.g. `admp`, `classical`).
+- **Testing and documentation expectations** (`docs/dev_guide/introduction.md:15-21`)
+  - New force-field modules and calculators are expected to ship with unit tests and documentation describing the underlying theory and user interface.
+  - The developer guide references a checklist before PR covering tests, formatting, and comments.
 
-- **Docstrings and comments**  
-  - DMFF adopts **NumPy-style docstrings**:
-    - `docs/dev_guide/convention.md:24-27` states:
-      - methods and classes should use NumPy-style docstrings, combined with `typing` annotations, to support API documentation generation;
-      - an extended example is provided via the Napoleon NumPy-style sample `docs/dev_guide/convention.md:30-387`.
-  - Documentation system: MkDocs; authoring guidelines in `docs/dev_guide/write_docs.md`:
-    - new docs are added as Markdown files in the appropriate directories;
-    - images should be placed under `docs/assets/` and referenced via relative paths `docs/dev_guide/write_docs.md:21-23`.
+## 4. Testing
 
-- **Language and dependencies**  
-  - Python version and runtime dependencies:
-    - `setup.py:47-53` requires Python `~=3.8`, and `setup.py:21-30` lists core dependencies such as `numpy>=1.18`, `jax>=0.4.1`, `openmm>=7.6.0`, `freud-analysis`, `networkx>=3.0`, `optax>=0.1.4`, `jaxopt>=0.8.0`, `pymbar>=4.0.0`, and `tqdm`.
-  - Docs-related dependencies: `requirements.txt:1-15` lists documentation tooling (`mkdocs`, `mkdocs-autorefs`, `mkdocs-gen-files`, `mkdocs-literate-nav`, `mkdocstrings`, `mkdocstrings-python`, `pygments`) and runtime libraries (`jax`, `jaxlib`, `pymbar`, `rdkit`, `ase`).
+- **Python test layout**
+  - Top-level tests live in `tests/`, grouped by module (e.g., `tests/test_admp/`, `tests/test_classical/`, `tests/test_common/`, `tests/test_difftraj/`, `tests/test_dimer/`, `tests/test_frontend/`, `tests/test_mbar/`, `tests/test_sgnn/`, and focused tests like `tests/test_energy.py`, `tests/test_utils.py`).
+  - `tests/conftest.py` is present for shared pytest configuration.
 
----
+- **Running Python tests**
+  - Use the Makefile targets listed in **2.1** for full or module-specific suites (`Makefile:1-31`).
+  - Under the hood, all targets call `pytest --disable-warnings` on the relevant test packages.
 
-### 4. Testing
+- **C++ / CUDA tests for dpnblist** (`dmff/dpnblist/CMakeLists.txt:67-76`)
+  - When `CMAKE_BUILD_TYPE` matches `Debug`, CMake also builds a `dpnblist` library target and adds the `dmff/dpnblist/tests/` subtree to the build via `add_subdirectory(tests)`, enabling C++-level tests for the neighbor-list algorithms.
 
-DMFF uses both Python-level unit/integration tests and C++-level backend tests.
+- **OpenMM plugin tests**
+  - The plugin is validated by the Python tests described in **2.3**, which exercise both reference and CUDA platforms (`backend/openmm_dmff_plugin/README.md:58-62`).
 
-- **Python test layout**  
-  - All Python tests live under `tests/`, covering: frontend API, classical force fields (`tests/test_classical/`), ADMP module (`tests/test_admp/`), neighbor-list utilities (`tests/test_common/`), DiffTraj, MBAR, SGNN, EANN, and others (see the directory tree under `tests/`).
-  - The `Makefile:1-31` provides per-module pytest entry points, making it easy to run only a subset of tests.
-  - `tests/conftest.py:1` is currently empty; there are no repository-wide pytest fixtures or hooks defined.
+- **Installation smoke tests** (`docs/user_guide/2.installation.md:42-55`)
+  - Quick checks: module imports and example scripts under `examples/` (for example, `examples/water_fullpol/run.py`) to ensure DMFF and its backends are wired correctly.
 
-- **Installation sanity checks (Python)**  
-  - User guide installation check `docs/user_guide/2.installation.md:42-52`:
-    - In an interactive Python session, import `dmff` and `dmff.admp` to ensure the package is available;
-    - run `examples/water_fullpol/run.py` to confirm example scripts execute successfully.
+## 5. Security
 
-- **C++ backend tests (dpnblist)**  
-  - `dmff/dpnblist/tests/CMakeLists.txt:1-38`:
-    - defines the `dpnblist_test` executable combining multiple `test_*.cpp` files;
-    - uses doctest for unit tests; when an external doctest installation is not found, it pulls in `external/doctest-2.4.11` and uses `doctest.cmake`;
-    - `doctest_discover_tests` registers tests with CTest.
+- **Scope and threat model**
+  - DMFF primarily operates on scientific data (force-field XML files, PDB/SDF structures, trajectories) and does not include explicit authentication, authorization, or network access layers in the core package.
+  - The repository does not define a DMFF-specific security policy; vendored dependencies like pybind11 carry their own security policy under `dmff/dpnblist/external/pybind11-2.11.1/SECURITY.md:1-13`.
 
-- **OpenMM plugin tests**  
-  - Python-level tests `backend/openmm_dmff_plugin/README.md:58-62`:
-    - `python -m OpenMMDMFFPlugin.tests.test_dmff_plugin_nve -n 100`;
-    - `python -m OpenMMDMFFPlugin.tests.test_dmff_plugin_nvt -n 100 --platform CUDA`.
-  - C++-level tests include `TestDMFFPlugin4CUDA.cpp` and `TestDMFFPlugin4Reference.cpp` with corresponding `CMakeLists.txt` under `backend/openmm_dmff_plugin/platforms/*/tests/`, used to validate force and energy consistency across platforms.
+- **Input handling**
+  - Topology and parameter inputs are loaded from XML, PDB, and SDF/SMILES via OpenMM and RDKit (`dmff/api/topology.py:70-96, 130-158` and `dmff/api/hamiltonian.py:78-90`). Invalid or inconsistent inputs can raise exceptions during sanitization or molecule regularization (`dmff/api/topology.py:218-229, 348-389`).
+  - Neighbor-list backends rely on freud or dpnblist; large systems and aggressive cutoffs can lead to very large neighbor lists and associated memory/compute costs (`dmff/common/nblist.py:96-123, 157-170, 204-223`).
 
----
+- **Native extensions and external runtimes**
+  - The dpnblist extension (`dmff/dpnblist`) and the OpenMM–DMFF plugin (`backend/openmm_dmff_plugin`) compile native code that runs in-process with Python, TensorFlow, and OpenMM.
+  - When upgrading these components or their dependencies (CUDA, TensorFlow, OpenMM, pybind11), refer to upstream security advisories and version policies; this is especially relevant for deployments on shared HPC resources.
 
-### 5. Security
+## 6. Configuration
 
-The repository does not contain a dedicated security design document or explicit security policies. This section lists only direct, observable facts related to data and dependencies, without adding generic recommendations.
+- **Global numerical settings** (`dmff/settings.py:1-19`)
+  - `PRECISION`: string, currently `'double'`; `update_jax_precision` maps this to `jax_enable_x64` at import time.
+  - `DO_JIT`: boolean flag controlling whether JAX JIT compilation is used by higher-level code (mentioned in `docs/user_guide/2.installation.md:55-55` as affecting initial run-time due to compilation).
+  - `DEBUG`: boolean, available for debug-related code paths; its use is module-specific.
+  - These symbols are exported via `__all__` and re-exported from `dmff/__init__.py:1-7` so they can be adjusted from user code before heavy JAX tracing.
 
-- **Data and file types**  
-  - Force fields and topologies: many XML and PDB files under `tests/data/` and `examples/` provide input for topology and parameter construction (`tests/data/*.xml`, `examples/*/*.xml`, `*.pdb`, etc.).
-  - Trained models and parameters:
-    - ML force-field parameters are stored in files such as `*.pickle` and `*.pt`, e.g. `examples/eann/eann_model.pickle`, `examples/sgnn/test_backend/model1.pth`, `tests/data/water_eann.pickle`;
-    - the OpenMM plugin uses `backend/save_dmff2tf.py` to export JAX models into a TensorFlow-compatible format consumed by the plugin `backend/openmm_dmff_plugin/README.md:4-5`.
+- **Neighbor-list backend selection** (`dmff/common/nblist.py:4-17, 81-140`)
+  - If `freud` is installed, `NeighborListFreud` is available; if `dpnblist` is installed, `NeighborListDp` is available. Otherwise, the code falls back to pure-Python neighbor lists and emits warnings (`dmff/common/nblist.py:5-17`).
+  - `NeighborList` is currently defined as an alias for the freud-based implementation (`dmff/common/nblist.py:81-142`).
+  - Cutoffs (`rcut`) and padding behavior are configured per neighbor-list instance.
 
-- **Dependencies and runtime environment**  
-  - Core numerical dependencies include `jax`, `jaxlib`, `numpy`, `openmm`, `rdkit`, etc., with version constraints specified in `setup.py:21-30`, `requirements.txt:1-15`, and `docs/user_guide/2.installation.md:3-33`.
-  - The OpenMM plugin depends on `libtensorflow_cc` and `cppflow`; TensorFlow headers under `tensorflow/c` must be copied from upstream sources into the conda environment `backend/openmm_dmff_plugin/README.md:18-27`.
+- **Topology and chemistry configuration** (`dmff/api/topology.py:41-61, 259-263`)
+  - `DMFFTopology` can be constructed from OpenMM `Topology`, SDF files, or RDKit molecules, with optional residue names and formal charges.
+  - Atom-level metadata (e.g., `FormalCharge`) is stored on atoms and reused when converting to RDKit molecules, enabling SMARTS-based pattern matching and atom-typing.
 
-- **Access control and encryption**  
-  - No additional access-control, authentication, or encryption mechanisms are defined in this repository;
-  - Configuration example `config/freud.ini:2-41` is for a third-party tool (layout, key bindings, DB filename, color scheme) and is not coupled to DMFF’s internal numerical logic.
+- **freud UI configuration** (`config/freud.ini:2-41`)
+  - A standalone INI file configures layout, key bindings, DB filename, JSON indentation, sorting, and style for tools based on freud; it is not imported by the core DMFF package but may be used by auxiliary tooling.
 
-More fine-grained security policies (data isolation, permission control, etc.) need to be handled by the systems that integrate DMFF; this repository itself does not impose additional constraints.
-
----
-
-### 6. Configuration & Environment
-
-- **Python environment and dependencies**  
-  - Recommended setup in `docs/user_guide/2.installation.md:3-33`:
-    - create a conda environment named `dmff` (example uses Python 3.9);
-    - install specific versions of JAX (CPU or CUDA builds), mdtraj, optax, jaxopt, pymbar, OpenMM, RDKit, etc.
-  - Package-level dependencies are centralized in `setup.py:21-30` and `requirements.txt:1-15` to aid environment reproduction.
-
-- **Global numerical and debug settings**  
-  - `dmff/settings.py:3-19` defines runtime configuration:
-    - `PRECISION`: controls whether JAX double precision is enabled (via `update_jax_precision` updating `jax_enable_x64`);
-    - `DO_JIT`: controls JIT compilation of core computations;
-    - `DEBUG`: toggles debug behavior;
-    - these are exported via `dmff/__init__.py:1` and can be imported and modified by user code.
-
-- **Documentation system configuration**  
-  - `mkdocs.yml:1-47`:
-    - defines the site name (`DMFF`) and navigation (User Guide, Developer Guide, module docs, etc.);
-    - uses the `readthedocs` theme and `pymdownx.arithmatex` for math rendering;
-    - enables `gen-files`, `literate-nav`, and `mkdocstrings` plugins to generate API references and SUMMARY-based navigation.
-
-- **Docker environments (packaging & development)**  
-  - `package/docker/develop_cpu.dockerfile` and `package/docker/develop_gpu.dockerfile` describe CPU/GPU development images (system dependencies plus Python environment) for reproducible development inside containers.
-
-- **External tool configuration example**  
-  - `config/freud.ini:2-41` configures a third-party tool (likely an HTTP/requests inspector) with layout, key bindings, database filename, and style settings; it is independent of DMFF’s core simulation logic and can be treated as optional tooling.
-
----
-
-The above content is intended to let developers or agents grasp DMFF’s overall design, build process, and testing/configuration strategy without fully reading the code. For concrete implementation or refactoring tasks, combine this overview with the corresponding module-specific docs (for example `docs/dev_guide/` and `docs/user_guide/4.*.md`) and nearby tests to drive detailed understanding and validation.
+- **OpenMM–DMFF plugin environment** (`backend/openmm_dmff_plugin/README.md:41-56`)
+  - The plugin build is configured via environment variables pointing to the OpenMM, cppflow, and TensorFlow prefix directories:
+    - `OPENMM_INSTALLED_DIR`
+    - `CPPFLOW_INSTALLED_DIR`
+    - `LIBTENSORFLOW_INSTALLED_DIR`
+  - These control include/library discovery during the CMake configuration of the plugin.
 
